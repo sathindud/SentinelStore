@@ -33,7 +33,7 @@ public class DistributedFileStorageTest {
         verifyFile(replica2, testFile, testData);
 
         // Test failure scenario
-        System.out.println("\nSimulating primary failure...");
+        System.out.println("\nSigive me the code for basic file storage with replication extending this code. Also show me how to test itmulating primary failure...");
         byte[] newData = "Updated content".getBytes();
         storageService.storeFile(testFile, newData);  // Should fail for replicas
 

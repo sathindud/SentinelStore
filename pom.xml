@@ -22,6 +22,13 @@
       <version>3.9.3</version>
     </dependency>
 
+      <dependency>
+          <groupId>junit</groupId>
+          <artifactId>junit</artifactId>
+          <version>4.13.2</version>
+          <scope>test</scope>
+      </dependency>
+
     <!-- Raft consensus (simplified) -->
 <!--    &lt;!&ndash; https://mvnrepository.com/artifact/org.corfudb/runtime &ndash;&gt;-->
 <!--    <dependency>-->
@@ -36,4 +43,16 @@
       <version>2.15.1</version>
     </dependency>
   </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>8</source>
+                    <target>8</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>
