@@ -78,7 +78,7 @@ public class Client {
 //        String response = client.uploadFile(leaderHost, leaderPort, fileContent);
 //        System.out.println("Client got response: " + response);
 
-        client.downloadFile(leaderHost,leaderPort, "cdf5cf85-020b-4cd2-9021-f0bd9b6f4ccc");
+        client.downloadFile(leaderHost,leaderPort, "25da106e-57dc-45c3-99bf-0ad915a8d8cb");
 
     }
 }

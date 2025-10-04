@@ -4,7 +4,6 @@ import org.apache.zookeeper.data.Stat;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.charset.StandardCharsets;
@@ -26,32 +25,27 @@ public class Node implements Watcher {
     private int serverPort;
     private File storageDir;
 
-    private static final List<String> clusterNodes = new ArrayList<>(); // host:port
+    private static final List<String> clusterNodes = new ArrayList<>();
 
-    // Leader log
     private File logFile;
 
-    //For Clock sync
-
     private static final long SYNC_INTERVAL_MS = 30000;
-    private long logicalClock;          // simulated time
-    private double tickRate = 1.0;      // 1.0 = normal speed, >1 = fast, <1 = slow
+    private long logicalClock;
+    private double tickRate = 1.0;
     private double slowDownRate = 0;
 
     SimpleDateFormat sdf;
+
     public Node(String nodeId, int serverPort) throws Exception {
         this.nodeId = nodeId;
         this.serverPort = serverPort;
 
-        // Create storage folder
         storageDir = new File("node_" + nodeId + "_files");
         if (!storageDir.exists()) storageDir.mkdirs();
 
-        // Create log file
         logFile = new File(storageDir, "log.txt");
         if (!logFile.exists()) logFile.createNewFile();
 
-        // Connect to ZooKeeper
         CountDownLatch connectedSignal = new CountDownLatch(1);
         this.zooKeeper = new ZooKeeper(zkHostPort, 3000, event -> {
             if (event.getState() == Watcher.Event.KeeperState.SyncConnected) connectedSignal.countDown();
@@ -62,13 +56,11 @@ public class Node implements Watcher {
         registerNodeInZooKeeper();
         watchClusterNodes();
 
-        //Starting the clock
         startClock();
-        sdf = new SimpleDateFormat("HH:mm:ss.SSS"); // hours:minutes:seconds.milliseconds
+        sdf = new SimpleDateFormat("HH:mm:ss.SSS");
 
         attemptLeadership();
 
-        // Sync log from leader if follower
         if (!isLeader) syncLogFromLeader();
 
         startServer();
@@ -140,10 +132,8 @@ public class Node implements Watcher {
     }
 
     private void performLeaderDuties() {
-        //Time sync
         syncLeaderWithNTP();
 
-        //Sending hart beats
         new Thread(() -> {
             try {
                 while (isLeader) {
@@ -167,181 +157,246 @@ public class Node implements Watcher {
     }
 
     private void handleConnection(Socket socket) {
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-             PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+        BufferedReader in = null;
+        PrintWriter out = null;
 
+        try {
+            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             String request = in.readLine();
-            if (request == null) return;
 
-            //Leaders code
-            if (isLeader && request.startsWith("UPLOAD:")) {
-                String content = request.substring(7).trim();
-                String fileId = UUID.randomUUID().toString();
-                long requestTime = logicalClock;
-
-                // Log file locally
-                appendToLocalLog(fileId, requestTime);
-
-                // Forward to Majoity of followers
-                List<String> followers = pickFollowers();
-                if (followers.isEmpty()) {
-                    out.println("No available followers to store file!");
-                    return;
-                }
-
-                // replicate log entry actively
-                for (String followerAddr: followers){
-                    replicateLogToFollower(followerAddr, fileId, requestTime);
-                }
-
-                //Erasure coding to store the file replicate only in the majority of followers
-                int majority = (clusterNodes.size() / 2) + 1;
-                int followersNeeded = majority - 1; // Followers needed for majority
-
-                if (followers.size() > followersNeeded) {
-                    Collections.shuffle(followers);
-                    followers = followers.subList(0, followersNeeded);
-                }
-
-                List<String> results = new ArrayList<>();
-                for (String followerAddr : followers) {
-                    String response = forwardToFollower(followerAddr, fileId, content, requestTime);
-                    results.add(followerAddr + " -> " + response);
-
-                }
-
-                out.println("File ID: " + fileId + " replicated to followers:\n" + String.join("\n", results));
-
-            }else if (isLeader && request.startsWith("DOWNLOAD")) {
-                String fileId = request.split(" ")[1].trim();
-
-                // Check if file exists in leader's log (log entries are requestTime:fileId)
-                Set<String> logEntries = readLocalLogEntries();
-                boolean foundInLog = false;
-                for (String entry : logEntries) {
-                    String[] parts = entry.split(":", 2);
-                    if (parts.length == 2 && parts[1].equals(fileId)) {
-                        foundInLog = true;
-                        break;
-                    }
-                }
-                if (!foundInLog) {
-                    out.println("NO_FILE_FOUND");
-                    out.println("END_FILE");
-                    return;
-                }
-
-                // Ask followers for the file and tally votes
-                List<String> followers = pickFollowers();
-                Map<String, Integer> contentVotes = new HashMap<>();
-
-                for (String followerAddr : followers) {
-                    String content = requestFileFromFollower(followerAddr, fileId);
-                    if (content != null) {
-                        String normalized = content.trim();
-                        contentVotes.put(normalized, contentVotes.getOrDefault(normalized, 0) + 1);
-                    }
-                }
-
-                // Include leader itself if it has file stored
-                File leaderFile = new File(storageDir, fileId + ".txt");
-                if (leaderFile.exists()) {
-                    String leaderContent = new String(Files.readAllBytes(leaderFile.toPath()), StandardCharsets.UTF_8).trim();
-                    contentVotes.put(leaderContent, contentVotes.getOrDefault(leaderContent, 0) + 1);
-                }
-
-                // Determine the most voted content
-                String consensusContent = null;
-                int maxVotes = 0;
-                for (Map.Entry<String, Integer> e : contentVotes.entrySet()) {
-                    if (e.getValue() > maxVotes) {
-                        maxVotes = e.getValue();
-                        consensusContent = e.getKey();
-                    }
-                }
-
-                // Compute majority threshold based on total cluster nodes
-                int totalNodes;
-                synchronized (clusterNodes) {
-                    totalNodes = clusterNodes.size() - 1;  // clusterNodes contains all nodes (including leader)
-                }
-                int majority = (totalNodes / 2) + 1;
-
-                // Return result only if the chosen content reached a majority
-                if (consensusContent != null && maxVotes >= majority) {
-                    out.println(consensusContent);
-                } else {
-                    out.println("NO_FILE_FOUND");
-                }
-                out.println("END_FILE");
-            }else if (isLeader && request.equals("GET_LOG")) {
-
-                try {
-                    byte[] logData = Files.readAllBytes(logFile.toPath());
-
-                    DataOutputStream dataOut = new DataOutputStream(socket.getOutputStream());
-
-                    dataOut.writeUTF("SUCCESS");
-
-                    dataOut.writeInt(logData.length);
-
-                    dataOut.write(logData);
-                    dataOut.flush();
-
-                    System.out.println("Leader: Sent log file via request socket, size: " + logData.length + " bytes");
-
-                } catch (IOException e) {
-                    System.err.println("Leader: Error sending log file: " + e.getMessage());
-                    try {
-                        // Send error through the same channel
-                        DataOutputStream dataOut = new DataOutputStream(socket.getOutputStream());
-                        dataOut.writeUTF("ERROR");
-                    } catch (IOException ex) {
-                        ex.printStackTrace();
-                    }
-                }
-            }else if (isLeader && request.equals("GET_TIME")) {
-                out.println(logicalClock);
+            if (request == null) {
+                return;
             }
 
-            // Followers Code
-            else if (!isLeader && request.startsWith("STORE")) {
-                String[] parts = request.split(" ", 4);
-                String fileId = parts[2];
-                String content = parts[3];
-                Files.writeString(Paths.get(storageDir.getPath(), fileId + ".txt"), content);
-                out.println("Follower stored file: " + fileId);
+            // Handle GET_LOG separately since it uses binary protocol
+            if (isLeader && request.equals("GET_LOG")) {
+                handleGetLog(socket);
+                return;
+            }
+
+            // For all other requests, use text-based protocol
+            out = new PrintWriter(socket.getOutputStream(), true);
+
+            if (isLeader && request.startsWith("UPLOAD:")) {
+                handleUpload(request, out);
+
+            } else if (isLeader && request.startsWith("DOWNLOAD")) {
+                handleDownload(request, out);
+
+            } else if (isLeader && request.equals("GET_TIME")) {
+                out.println(logicalClock);
+
+            } else if (!isLeader && request.startsWith("STORE")) {
+                handleStore(request, out);
 
             } else if (!isLeader && request.startsWith("APPEND_LOG:")) {
-                String[] parts = request.split(":", 3);
-                long requestTime = Long.parseLong(parts[1]);
-                String fileId = parts[2];
-
-                // Append in order
-                synchronized (logFile) {
-                    List<String> existing = Files.readAllLines(logFile.toPath(), StandardCharsets.UTF_8);
-                    existing.add(requestTime + ":" + fileId);
-
-                    // Sort by requestTime to maintain order
-                    existing.sort(Comparator.comparingLong(s -> Long.parseLong(s.split(":")[0])));
-                    Files.write(logFile.toPath(), existing, StandardCharsets.UTF_8);
-                }
-                out.println("LOG_OK");
+                handleAppendLog(request, out);
 
             } else if (!isLeader && request.startsWith("QUERY_FILE")) {
-                String fileId = request.split(" ")[1].trim();
-                File file = new File(storageDir, fileId + ".txt");
-                if (file.exists()) {
-                    try (BufferedReader br = new BufferedReader(new FileReader(file))) {
-                        String line;
-                        while ((line = br.readLine()) != null) out.println(line);
-                    }
-                }
-                out.println("END_FILE");
+                handleQueryFile(request, out);
             }
 
+        } catch (IOException e) {
+            System.err.println(nodeId + " error handling connection: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            try {
+                if (out != null) out.close();
+                if (in != null) in.close();
+                if (!socket.isClosed()) socket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
 
-        } catch (IOException e) { e.printStackTrace(); }
+    private void handleGetLog(Socket socket) {
+        DataOutputStream dataOut = null;
+        try {
+            byte[] logData = Files.readAllBytes(logFile.toPath());
+
+            dataOut = new DataOutputStream(socket.getOutputStream());
+            dataOut.writeUTF("SUCCESS");
+            dataOut.writeInt(logData.length);
+            dataOut.write(logData);
+            dataOut.flush();
+
+            System.out.println("Leader: Sent log file, size: " + logData.length + " bytes");
+
+        } catch (IOException e) {
+            System.err.println("Leader: Error sending log file: " + e.getMessage());
+            try {
+                if (dataOut == null) {
+                    dataOut = new DataOutputStream(socket.getOutputStream());
+                }
+                dataOut.writeUTF("ERROR");
+                dataOut.flush();
+            } catch (IOException ex) {
+                ex.printStackTrace();
+            }
+        } finally {
+            try {
+                if (dataOut != null) dataOut.close();
+                if (!socket.isClosed()) socket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void handleUpload(String request, PrintWriter out) throws IOException {
+        String content = request.substring(7).trim();
+        String fileId = UUID.randomUUID().toString();
+        long requestTime = logicalClock;
+
+        int totalNodes = clusterNodes.size();
+        int majority = (totalNodes / 2) + 1;
+
+        appendToLocalLog(fileId, requestTime);
+        File leaderFile = new File(storageDir, fileId + ".txt");
+        Files.write(leaderFile.toPath(), content.getBytes(StandardCharsets.UTF_8));
+
+        List<String> followers = pickFollowers();
+        if (followers.isEmpty() && majority > 1) {
+            out.println("No available followers to achieve majority!");
+            return;
+        }
+
+        for (String followerAddr : followers) {
+            replicateLogToFollower(followerAddr, fileId, requestTime);
+        }
+
+        int followersNeeded = majority - 1;
+
+        if (followers.size() < followersNeeded) {
+            out.println("Not enough followers available to achieve majority! Need " +
+                    followersNeeded + " but only have " + followers.size());
+            return;
+        }
+
+        Collections.shuffle(followers);
+        List<String> selectedFollowers = followers.subList(0, followersNeeded);
+
+        List<String> results = new ArrayList<>();
+        int successCount = 1;
+
+        for (String followerAddr : selectedFollowers) {
+            String response = forwardToFollower(followerAddr, fileId, content, requestTime);
+            results.add(followerAddr + " -> " + response);
+            if (response != null && response.contains("SUCCESS")) {
+                successCount++;
+            }
+        }
+
+        if (successCount >= majority) {
+            out.println("File ID: " + fileId + " successfully replicated to majority (" +
+                    successCount + "/" + totalNodes + " nodes):\n" + String.join("\n", results));
+        } else {
+            out.println("Failed to replicate to majority. Only " + successCount +
+                    "/" + totalNodes + " nodes confirmed storage.");
+        }
+    }
+
+    private void handleDownload(String request, PrintWriter out) throws IOException {
+        String fileId = request.split(" ")[1].trim();
+
+        Set<String> logEntries = readLocalLogEntries();
+        boolean foundInLog = false;
+        for (String entry : logEntries) {
+            String[] parts = entry.split(":", 2);
+            if (parts.length == 2 && parts[1].equals(fileId)) {
+                foundInLog = true;
+                break;
+            }
+        }
+
+        if (!foundInLog) {
+            out.println("NO_FILE_FOUND");
+            out.println("END_FILE");
+            return;
+        }
+
+        int totalNodes = clusterNodes.size();
+        int expectedReplicas = (totalNodes / 2) + 1;
+        int majority = (expectedReplicas / 2) + 1;
+
+        Map<String, Integer> contentVotes = new HashMap<>();
+        int totalResponses = 0;
+
+        File leaderFile = new File(storageDir, fileId + ".txt");
+        if (leaderFile.exists()) {
+            String leaderContent = new String(Files.readAllBytes(leaderFile.toPath()),
+                    StandardCharsets.UTF_8).trim();
+            contentVotes.put(leaderContent, contentVotes.getOrDefault(leaderContent, 0) + 1);
+            totalResponses++;
+        }
+
+        List<String> followers = pickFollowers();
+        for (String followerAddr : followers) {
+            String content = requestFileFromFollower(followerAddr, fileId);
+            if (content != null && !content.equals("NO_FILE_FOUND")) {
+                String normalized = content.trim();
+                contentVotes.put(normalized, contentVotes.getOrDefault(normalized, 0) + 1);
+                totalResponses++;
+            }
+        }
+
+        String consensusContent = null;
+        int maxVotes = 0;
+        for (Map.Entry<String, Integer> e : contentVotes.entrySet()) {
+            if (e.getValue() > maxVotes) {
+                maxVotes = e.getValue();
+                consensusContent = e.getKey();
+            }
+        }
+
+        if (consensusContent != null && maxVotes >= majority) {
+            out.println(consensusContent);
+        } else {
+            if (totalResponses == 0) {
+                out.println("NO_FILE_FOUND - No nodes have this file");
+            } else {
+                out.println("NO_FILE_FOUND - No majority consensus (max votes: " +
+                        maxVotes + "/" + expectedReplicas + ")");
+            }
+        }
+        out.println("END_FILE");
+    }
+
+    private void handleStore(String request, PrintWriter out) throws IOException {
+        String[] parts = request.split(" ", 4);
+        String fileId = parts[2];
+        String content = parts[3];
+        Files.writeString(Paths.get(storageDir.getPath(), fileId + ".txt"), content);
+        out.println("SUCCESS: Follower stored file: " + fileId);
+    }
+
+    private void handleAppendLog(String request, PrintWriter out) throws IOException {
+        String[] parts = request.split(":", 3);
+        long requestTime = Long.parseLong(parts[1]);
+        String fileId = parts[2];
+
+        synchronized (logFile) {
+            List<String> existing = Files.readAllLines(logFile.toPath(), StandardCharsets.UTF_8);
+            existing.add(requestTime + ":" + fileId);
+            existing.sort(Comparator.comparingLong(s -> Long.parseLong(s.split(":")[0])));
+            Files.write(logFile.toPath(), existing, StandardCharsets.UTF_8);
+        }
+        out.println("LOG_OK");
+    }
+
+    private void handleQueryFile(String request, PrintWriter out) throws IOException {
+        String fileId = request.split(" ")[1].trim();
+        File file = new File(storageDir, fileId + ".txt");
+        if (file.exists()) {
+            try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    out.println(line);
+                }
+            }
+        }
+        out.println("END_FILE");
     }
 
     private String requestFileFromFollower(String followerAddr, String fileId) {
@@ -379,7 +434,7 @@ public class Node implements Watcher {
     private List<String> pickFollowers() {
         synchronized (clusterNodes) {
             List<String> followers = new ArrayList<>(clusterNodes);
-            followers.remove(host + ":" + serverPort); // exclude self
+            followers.remove(host + ":" + serverPort);
             return followers;
         }
     }
@@ -397,7 +452,10 @@ public class Node implements Watcher {
                 out.println("STORE " + requestTime + " " + fileId + " " + content);
                 return in.readLine();
             }
-        } catch (Exception e) { e.printStackTrace(); return "Error forwarding to follower"; }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "Error forwarding to follower: " + e.getMessage();
+        }
     }
 
     private void replicateLogToFollower(String followerAddr, String fileId, long requestTime) {
@@ -411,7 +469,7 @@ public class Node implements Watcher {
                  BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
 
                 out.println("APPEND_LOG:" + requestTime + ":" + fileId);
-                in.readLine(); // wait for ACK
+                in.readLine();
             }
         } catch (Exception e) { e.printStackTrace(); }
     }
@@ -446,26 +504,22 @@ public class Node implements Watcher {
                      PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
                      DataInputStream dataIn = new DataInputStream(socket.getInputStream())) {
 
-                    // Set timeout
                     socket.setSoTimeout(10000);
 
-                    // Send request through the socket
                     out.println("GET_LOG");
+                    out.flush();
                     System.out.println(nodeId + " sent GET_LOG request to leader");
 
-                    // Read response through the SAME socket
                     String status = dataIn.readUTF();
                     System.out.println(nodeId + " received status: " + status);
 
                     if ("SUCCESS".equals(status)) {
-                        // Read file size and content through the SAME socket
                         int fileSize = dataIn.readInt();
                         System.out.println(nodeId + " receiving log file, size: " + fileSize + " bytes");
 
                         byte[] logData = new byte[fileSize];
                         dataIn.readFully(logData);
 
-                        // Replace local log file
                         Files.write(logFile.toPath(), logData);
                         System.out.println(nodeId + " completed log sync. Received: " + fileSize + " bytes");
                         break;
@@ -480,7 +534,6 @@ public class Node implements Watcher {
             }
         }
     }
-
 
     private Set<String> readLocalLogEntries() {
         Set<String> entries = new HashSet<>();
@@ -505,15 +558,14 @@ public class Node implements Watcher {
         }
     }
 
-    // Leader: periodically sync with NTP
     private void syncLeaderWithNTP() {
         new Thread(() -> {
             while (isLeader) {
                 try {
-                    long ntpTime = System.currentTimeMillis(); // Simulated NTP
+                    long ntpTime = System.currentTimeMillis();
                     synchronized (this) {
-                        logicalClock = ntpTime;  // reset to real NTP time
-                        tickRate = 1.0;          // leader ticks normally
+                        logicalClock = ntpTime;
+                        tickRate = 1.0;
                     }
                     System.out.println("Leader " + nodeId + " synced with NTP at " + new Date(logicalClock));
                     Thread.sleep(SYNC_INTERVAL_MS);
@@ -524,7 +576,6 @@ public class Node implements Watcher {
         }).start();
     }
 
-    // Follower: sync clock from leader using Cristian’s
     private void syncClockFromLeader() {
         new Thread(() -> {
             while (!isLeader) {
@@ -541,7 +592,7 @@ public class Node implements Watcher {
                     String leaderHost = parts[1];
                     int leaderPort = Integer.parseInt(parts[2]);
 
-                    long t0 = logicalClock; // send time
+                    long t0 = logicalClock;
 
                     try (Socket socket = new Socket(leaderHost, leaderPort);
                          PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
@@ -550,7 +601,7 @@ public class Node implements Watcher {
                         out.println("GET_TIME");
                         String response = in.readLine();
 
-                        long t1 = logicalClock; // receive time
+                        long t1 = logicalClock;
                         long RTT = t1 - t0;
 
                         long leaderTime = Long.parseLong(response);
@@ -562,7 +613,6 @@ public class Node implements Watcher {
                         Date leaderTimeDate = new Date(leaderTime);
 
                         if (offset > 0) {
-                            // Behind → jump forward immediately
                             logicalClock += offset;
                             tickRate = 1.0;
                             slowDownRate = 0;
@@ -570,9 +620,8 @@ public class Node implements Watcher {
                                     " leader time " + sdf.format(leaderTimeDate) +
                                     " fast-forwarded by " + offset + " ms");
                         } else if (offset < 0) {
-                            // Ahead → slow down
                             slowDownRate = (double)Math.abs(offset) / SYNC_INTERVAL_MS;
-                            tickRate = 1.0 - slowDownRate; // reduce tick rate slightly
+                            tickRate = 1.0 - slowDownRate;
                             System.out.println(nodeId + " node time " + sdf.format(nodeTime) +
                                     " leader time " + sdf.format(leaderTimeDate) +
                                     " slowing clock with tickRate " + tickRate);
@@ -589,24 +638,20 @@ public class Node implements Watcher {
         }).start();
     }
 
-    // Logical clock updater
     private void startClock() {
         logicalClock = System.currentTimeMillis();
 
         new Thread(() -> {
             while (true) {
                 try {
-                    Thread.sleep(1000); // simulate 1s tick
+                    Thread.sleep(1000);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                // advance by tickRate seconds
                 logicalClock += (long)(1000 * tickRate);
             }
         }).start();
     }
-
-
 
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
