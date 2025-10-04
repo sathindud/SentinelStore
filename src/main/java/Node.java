@@ -215,54 +215,63 @@ public class Node implements Watcher {
             }else if (isLeader && request.startsWith("DOWNLOAD")) {
                 String fileId = request.split(" ")[1].trim();
 
-                // Check if file exists in leader's log
+                // Check if file exists in leader's log (log entries are requestTime:fileId)
                 Set<String> logEntries = readLocalLogEntries();
-                boolean found = false;
+                boolean foundInLog = false;
                 for (String entry : logEntries) {
-                    String[] parts = entry.split(":");
+                    String[] parts = entry.split(":", 2);
                     if (parts.length == 2 && parts[1].equals(fileId)) {
-                        found = true;
+                        foundInLog = true;
                         break;
                     }
                 }
-                if (!found) {
+                if (!foundInLog) {
                     out.println("NO_FILE_FOUND");
                     out.println("END_FILE");
                     return;
                 }
 
-                // Ask all followers for the file
+                // Ask followers for the file and tally votes
                 List<String> followers = pickFollowers();
                 Map<String, Integer> contentVotes = new HashMap<>();
 
                 for (String followerAddr : followers) {
                     String content = requestFileFromFollower(followerAddr, fileId);
                     if (content != null) {
-                        contentVotes.put(content, contentVotes.getOrDefault(content, 0) + 1);
+                        String normalized = content.trim();
+                        contentVotes.put(normalized, contentVotes.getOrDefault(normalized, 0) + 1);
                     }
                 }
 
                 // Include leader itself if it has file stored
                 File leaderFile = new File(storageDir, fileId + ".txt");
                 if (leaderFile.exists()) {
-                    String content = new String(Files.readAllBytes(leaderFile.toPath()));
-                    contentVotes.put(content, contentVotes.getOrDefault(content, 0) + 1);
+                    String leaderContent = new String(Files.readAllBytes(leaderFile.toPath()), StandardCharsets.UTF_8).trim();
+                    contentVotes.put(leaderContent, contentVotes.getOrDefault(leaderContent, 0) + 1);
                 }
 
-                // Find the content with max votes (consensus)
+                // Determine the most voted content
                 String consensusContent = null;
                 int maxVotes = 0;
-                for (Map.Entry<String, Integer> entry : contentVotes.entrySet()) {
-                    if (entry.getValue() > maxVotes) {
-                        maxVotes = entry.getValue();
-                        consensusContent = entry.getKey();
+                for (Map.Entry<String, Integer> e : contentVotes.entrySet()) {
+                    if (e.getValue() > maxVotes) {
+                        maxVotes = e.getValue();
+                        consensusContent = e.getKey();
                     }
                 }
 
-                if (consensusContent == null) {
-                    out.println("NO_FILE_FOUND");
-                } else {
+                // Compute majority threshold based on total cluster nodes
+                int totalNodes;
+                synchronized (clusterNodes) {
+                    totalNodes = clusterNodes.size() - 1;  // clusterNodes contains all nodes (including leader)
+                }
+                int majority = (totalNodes / 2) + 1;
+
+                // Return result only if the chosen content reached a majority
+                if (consensusContent != null && maxVotes >= majority) {
                     out.println(consensusContent);
+                } else {
+                    out.println("NO_FILE_FOUND");
                 }
                 out.println("END_FILE");
             }else if (isLeader && request.equals("GET_LOG")) {
