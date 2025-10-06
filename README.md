@@ -36,13 +36,25 @@ Downloads use a majority-vote consensus to determine the correct file version.
 ## ⚙️ Setup Instructions
 
 ### Step 1: Start ZooKeeper
-After installing ZooKeeper, start the server with:
+After installing ZooKeeper,
+
+first edit or create zoo.cfg file in the conf folder
+
+```bash
+tickTime=2000
+initLimit=10
+syncLimit=5
+dataDir=zookeeper/data
+clientPort=2181
+````
+
+then start the server:
 
 ```bash
 zkServer.sh start
 ```
 
-# Step 2: Run Server Nodes
+## Step 2: Run Server Nodes
 You need to run 5 server nodes (each in a separate IntelliJ run instance or terminal).
 
 1. In IntelliJ:
@@ -79,19 +91,20 @@ Node node2 started as Follower on port 5002
 ...
 
 ## Step 3: Run Client
-Once the nodes are running, you can run the client mode (in IntelliJ or terminal) to upload and download files.
+Once the nodes are running, you can run the Client.java to upload and download files.
 
 ### Upload a File
-Run the following command in IntelliJ:
+Create a new Client Instance woith the following arguments
+
+
+``` php-template
+upload <file path>
+```
+Example:
+Their is a sample.txt file in the root folder
 
 ``` nginx
-upload
-```
-
-You’ll be prompted to enter the file content:
-```css
-Enter file content to upload:
-Hello from the distributed system!
+upload sample.txt
 ```
 
 ✅ The leader will:

@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Scanner;
 
 public class Client {
@@ -60,6 +62,11 @@ public class Client {
 
     public static void main(String[] args) throws Exception {
 
+        if (args.length < 2) {
+            System.out.println("Usage: <command> <file id | file path>");
+            System.exit(1);
+        }
+
         String zkHostPort = "localhost:2181";
         Client client = new Client(zkHostPort);
         String[] leaderInfo = client.getLeaderInfo();
@@ -67,29 +74,24 @@ public class Client {
         String leaderHost = leaderInfo[1];
         int leaderPort = Integer.parseInt(leaderInfo[2]);
 
+
         if (args[0].equalsIgnoreCase("upload")){
-            Scanner scanner = new Scanner(System.in);
-            System.out.println("Enter file content: ");
-            String fileContent = scanner.nextLine();
-            System.out.println("Leader elected: " + leaderId + " at " + leaderHost + ":" + leaderPort);
-            String response = client.uploadFile(leaderHost, leaderPort, fileContent);
-            System.out.println("Client got response: " + response);
-        } else if (args[0].equalsIgnoreCase("download")) {
-            if(args.length < 1){
-                System.out.println("Usage: <command> <file id>");
-                System.exit(1);
+
+            String filePath = args[1];
+            try {
+                String fileContent = new String(Files.readAllBytes(Paths.get(filePath)));
+
+                System.out.println("Leader elected: " + leaderId + " at " + leaderHost + ":" + leaderPort);
+                String response = client.uploadFile(leaderHost, leaderPort, fileContent);
+                System.out.println("Client got response: " + response);
+            } catch (IOException e) {
+                System.out.println("Error reading file: " + e.getMessage());
             }
+        } else if (args[0].equalsIgnoreCase("download")) {
             client.downloadFile(leaderHost,leaderPort, args[1]);
         }else{
             System.out.println("Command not found");
         }
-
-        if (args.length < 2) {
-            System.out.println("Usage: <command> <file id>");
-            System.exit(1);
-        }
-
-
 
     }
 }
