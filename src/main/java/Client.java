@@ -61,24 +61,35 @@ public class Client {
     public static void main(String[] args) throws Exception {
 
         String zkHostPort = "localhost:2181";
-
-        Scanner scanner = new Scanner(System.in);
-        System.out.println("Enter file content: ");
-        String fileContent = scanner.nextLine();
-
         Client client = new Client(zkHostPort);
         String[] leaderInfo = client.getLeaderInfo();
-
         String leaderId = leaderInfo[0];
         String leaderHost = leaderInfo[1];
         int leaderPort = Integer.parseInt(leaderInfo[2]);
 
-        System.out.println("Leader elected: " + leaderId + " at " + leaderHost + ":" + leaderPort);
+        if (args[0].equalsIgnoreCase("upload")){
+            Scanner scanner = new Scanner(System.in);
+            System.out.println("Enter file content: ");
+            String fileContent = scanner.nextLine();
+            System.out.println("Leader elected: " + leaderId + " at " + leaderHost + ":" + leaderPort);
+            String response = client.uploadFile(leaderHost, leaderPort, fileContent);
+            System.out.println("Client got response: " + response);
+        } else if (args[0].equalsIgnoreCase("download")) {
+            if(args.length < 1){
+                System.out.println("Usage: <command> <file id>");
+                System.exit(1);
+            }
+            client.downloadFile(leaderHost,leaderPort, args[1]);
+        }else{
+            System.out.println("Command not found");
+        }
 
-//        String response = client.uploadFile(leaderHost, leaderPort, fileContent);
-//        System.out.println("Client got response: " + response);
+        if (args.length < 2) {
+            System.out.println("Usage: <command> <file id>");
+            System.exit(1);
+        }
 
-        client.downloadFile(leaderHost,leaderPort, "25da106e-57dc-45c3-99bf-0ad915a8d8cb");
+
 
     }
 }
