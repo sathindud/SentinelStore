@@ -295,38 +295,17 @@ node_Node1_files/log.txt
 
 ## 🎯 Usage Examples
 
-### Uploading Various File Types
+### Uploading File
 
-```bash
-# Documents
-java Client upload report.pdf
-java Client upload presentation.pptx
-java Client upload spreadsheet.xlsx
-
-# Images
-java Client upload diagram.png
-java Client upload photo.jpg
-
-# Archives
-java Client upload backup.zip
-java Client upload data.tar.gz
-
-# Media
-java Client upload recording.mp4
-java Client upload audio.mp3
-
-# Any other file
-java Client upload database.db
-java Client upload binary.exe
+Example we include a sample.txt file
+```agsl
+java Client upload sample.txt
 ```
+### Downloading File
 
-### Downloading Files
-
-```bash
-# Download using original filename
-java Client download report.pdf
-java Client download photo.jpg
-java Client download backup.zip
+Example download that sample.txt file
+```agsl
+java Client download sample.txt
 ```
 
 ---
